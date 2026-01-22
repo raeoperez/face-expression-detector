@@ -1,13 +1,12 @@
 
-
-import sys, streamlit as st
-st.caption(f"Python: {sys.version}")
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
-import av
 import cv2
-import mediapipe as mp
 import numpy as np
+import mediapipe as mp
+from PIL import Image
+import base64
+
+st.set_page_config(page_title="Face Expression Detector", page_icon="😊")
 
 mp_face_mesh = mp.solutions.face_mesh
 
@@ -23,13 +22,10 @@ LM = {
     "nose_tip": 1,
 }
 
-
 def distance(a, b):
     return np.linalg.norm(np.array([a.x - b.x, a.y - b.y]))
 
-
 def classify_expression(landmarks):
-
     L = landmarks[LM["mouth_left"]]
     R = landmarks[LM["mouth_right"]]
     U = landmarks[LM["upper_inner"]]
@@ -40,25 +36,19 @@ def classify_expression(landmarks):
     RE_in = landmarks[LM["right_eye_inner"]]
     RE_out = landmarks[LM["right_eye_outer"]]
 
-    nose = landmarks[LM["nose_tip"]]
-
-    # Mouth geometry
     mouth_width = distance(L, R)
     mouth_height = distance(U, D)
     mar = mouth_height / (mouth_width + 1e-6)
 
-    # Smile curvature 
     dx = R.x - L.x
     dy = R.y - L.y
     angle = np.degrees(np.arctan2(dy, dx))
     curvature = -angle / 15
 
-    # Corner height
     mouth_center_y = (U.y + D.y) / 2
     corner_height = ((mouth_center_y - L.y) + (mouth_center_y - R.y)) / 2
     corner_norm = corner_height / (mouth_width + 1e-6)
 
-    # Eye squeeze
     left_eye = distance(LE_in, LE_out)
     right_eye = distance(RE_in, RE_out)
     eye_avg = (left_eye + right_eye) / 2
@@ -83,44 +73,86 @@ def classify_expression(landmarks):
         return "no reaction"
 
 
-class EmotionProcessor(VideoProcessorBase):
+# ------------------ STREAMLIT UI -------------------
 
-    def __init__(self):
-        self.mesh = mp_face_mesh.FaceMesh(
-            max_num_faces=1,
-            refine_landmarks=True,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+st.title("😊 Real-Time Expression Detector (Web Version)")
+st.write("Please allow camera access.")
 
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        res = self.mesh.process(rgb)
+# JS camera widget
+camera_js = """
+<script>
+let video = document.createElement('video');
+video.setAttribute('autoplay', '');
+video.setAttribute('playsinline', '');
+video.style.display = 'none';
+document.body.appendChild(video);
 
-        label = "no face"
+navigator.mediaDevices.getUserMedia({ video: true })
+.then(stream => {
+    video.srcObject = stream;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
 
-        if res.multi_face_landmarks:
-            face = res.multi_face_landmarks[0].landmark
-            label = classify_expression(face)
+    function sendFrame() {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0);
+        let dataURL = canvas.toDataURL('image/jpeg');
+        window.parent.postMessage({type: 'frame', data: dataURL}, "*");
+        requestAnimationFrame(sendFrame);
+    }
+    sendFrame();
+})
+.catch(err => console.log(err));
+</script>
+"""
 
-        color = (0, 255, 0) if label == "smiling" else \
-                (0, 165, 255) if label == "no reaction" else (0, 0, 255)
+st.components.v1.html(camera_js, height=0)
 
-        cv2.putText(img, label, (30, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.8, color, 4)
+if "frame" not in st.session_state:
+    st.session_state.frame = None
 
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
+frame_container = st.empty()
+label_container = st.empty()
+
+def process_frame(data_url):
+    header, encoded = data_url.split(",", 1)
+    img_bytes = base64.b64decode(encoded)
+    img = Image.open(BytesIO(img_bytes))
+    img = img.convert("RGB")
+    img_np = np.array(img)
+
+    h, w = img_np.shape[:2]
+    rgb = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+
+    with mp_face_mesh.FaceMesh(
+        max_num_faces=1,
+        refine_landmarks=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    ) as mesh:
+        res = mesh.process(rgb)
+
+    if res.multi_face_landmarks:
+        face = res.multi_face_landmarks[0].landmark
+        return img_np, classify_expression(face)
+    else:
+        return img_np, "no face"
 
 
-st.title("😊 Real-Time Web-based Face Expression Detector")
+st.markdown("""
+<script>
+window.addEventListener("message", (event) => {
+    if (event.data.type === "frame") {
+        window.parent.streamlitSend({"frame": event.data.data});
+    }
+});
+</script>
+""", unsafe_allow_html=True)
 
-webrtc_streamer(
-    key="emotions",
-    video_processor_factory=EmotionProcessor,
-    rtc_configuration={
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-    },
-    media_stream_constraints={"video": True, "audio": False},
-    mode=WebRtcMode.SENDRECV,
-)
+frame = st.session_state.get("frame")
+
+if frame:
+    img_np, label = process_frame(frame)
+    frame_container.image(img_np)
+    label_container.subheader(f"**{label}**")
