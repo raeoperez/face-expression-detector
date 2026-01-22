@@ -1,4 +1,7 @@
 
+
+import sys, streamlit as st
+st.caption(f"Python: {sys.version}")
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, VideoProcessorBase
 import av
