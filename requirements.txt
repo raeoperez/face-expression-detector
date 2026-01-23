@@ -4,4 +4,6 @@ opencv-python-headless==4.10.0.84
 mediapipe==0.10.20
 numpy==1.26.4
 Pillow==10.4.0
-stream
+streamlit-webrtc==0.47.6
+aiortc
+# NOTE: we intentionally do NOT pin 'av' here so pip can pick a prebuilt wheel on Streamlit Cloud
